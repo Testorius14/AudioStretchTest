@@ -1,0 +1,52 @@
+name: Compilar y publicar
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  compilar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pruebas del motor en C++ (nativo)
+        run: |
+          g++ -O2 -std=c++14 -Ithird_party/world/src test/test_nativo.cpp src/world_wasm.cpp third_party/world/src/*.cpp -o test_nativo
+          ./test_nativo
+
+      - name: Pruebas de la logica de edicion
+        run: node test/test_editor.js
+
+      - name: Instalar Emscripten
+        uses: mymindstorm/setup-emsdk@v14
+
+      - name: Compilar a WebAssembly
+        run: bash build.sh
+
+      - name: Guardar la pagina compilada (para descargarla)
+        uses: actions/upload-artifact@v4
+        with:
+          name: pagina
+          path: web
+
+      - name: Preparar para GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: web
+
+  publicar:
+    needs: compilar
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.pages.outputs.page_url }}
+    steps:
+      - id: pages
+        uses: actions/deploy-pages@v4

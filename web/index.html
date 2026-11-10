@@ -1,0 +1,525 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Estirador vocal</title>
+<style>
+  :root { --bg:#2a2a2e; --panel:#38383d; --borde:#555; --texto:#ddd; --acento:#4da3ff; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body { margin: 0; background: var(--bg); color: var(--texto); font: 14px system-ui, sans-serif;
+         display: flex; flex-direction: column; }
+  #barra { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px;
+           background: var(--panel); border-bottom: 1px solid var(--borde); }
+  button, select, input { background: #222; color: var(--texto); border: 1px solid var(--borde);
+           border-radius: 4px; padding: 6px 10px; font: inherit; }
+  button:hover:not(:disabled) { border-color: var(--acento); }
+  button.on { background: var(--acento); color: #000; }
+  button:disabled { opacity: .4; }
+  input[type=number] { width: 68px; }
+  label { display: flex; align-items: center; gap: 4px; }
+  .sep { width: 1px; height: 24px; background: var(--borde); margin: 0 4px; }
+  #zona { flex: 1; position: relative; min-height: 200px; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; touch-action: none; }
+  #pie { display: flex; gap: 10px; align-items: center; padding: 6px; background: var(--panel);
+         border-top: 1px solid var(--borde); }
+  #desp { flex: 1; min-width: 80px; padding: 0; }
+  #estado { flex: 3; font-size: 13px; }
+</style>
+</head>
+<body>
+<div id="barra">
+  <button id="bAbrir">Abrir audio</button>
+  <input type="file" id="archivo" accept="audio/*" hidden>
+  <select id="selFs" title="Calidad (más alta = más memoria)">
+    <option value="22050">22 kHz</option>
+    <option value="32000">32 kHz</option>
+    <option value="44100">44 kHz</option>
+  </select>
+  <select id="selAn" title="Método de análisis del tono">
+    <option value="0">Análisis rápido</option>
+    <option value="1">Análisis preciso</option>
+  </select>
+  <label>Tono <input type="number" id="f0min" value="71" min="40" max="400"> a
+    <input type="number" id="f0max" value="800" min="200" max="2000"> Hz</label>
+  <span class="sep"></span>
+  <button id="tSel" class="on">Seleccionar</button>
+  <button id="tTono">Tono</button>
+  <span class="sep"></span>
+  <label>Factor <input type="number" id="factor" value="2" step="0.1" min="0.1"></label>
+  <label><input type="checkbox" id="conservar" checked> Conservar resto</label>
+  <button id="bEstirar" disabled>Estirar</button>
+  <button id="bDeshacer" disabled>Deshacer</button>
+  <span class="sep"></span>
+  <button id="bPlay" disabled>▶ Reproducir</button>
+  <button id="bGuardar" disabled>Guardar WAV</button>
+  <span class="sep"></span>
+  <button id="bMenos" disabled>−</button>
+  <button id="bMas" disabled>+</button>
+</div>
+<div id="zona"><canvas id="c"></canvas></div>
+<div id="pie">
+  <input type="range" id="desp" min="0" max="0" step="0.01" value="0" title="Desplazamiento en el tiempo">
+  <span id="estado">Abrí un audio para empezar.</span>
+</div>
+
+<script src="editor.js"></script>
+<script>
+(() => {
+'use strict';
+const $ = (id) => document.getElementById(id);
+const cv = $('c'), cx = cv.getContext('2d');
+const GUT = 46, RULER = 22, WAVE = 70;
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+// ---------- Motor (worker) ----------
+const worker = new Worker('worker.js');
+let sigId = 1;
+const pend = new Map();
+worker.onmessage = (e) => {
+  const p = pend.get(e.data.id);
+  if (!p) return;
+  pend.delete(e.data.id);
+  e.data.error ? p.rej(new Error(e.data.error)) : p.res(e.data);
+};
+worker.onerror = (e) => {
+  setEstado('Error del motor: ' + (e.message || 'no se pudo cargar world.js (¿ya compilaste el WebAssembly?)'));
+};
+function llamar(msg, transfer) {
+  return new Promise((res, rej) => {
+    const id = sigId++;
+    pend.set(id, { res, rej });
+    worker.postMessage(Object.assign({ id }, msg), transfer || []);
+  });
+}
+
+// ---------- Estado ----------
+const S = {
+  fs: 22050, fp: 5, f0: null, picos: null, est: null, hist: [], sel: null,
+  t0: 0, pps: 100, herr: 'sel', mLo: 48, mHi: 84,
+  curvaAct: null, curvaBase: null, hayTono: false,
+  rendered: null, sucio: false, ocupado: false,
+  ac: null, src: null, sonando: false, playT: null, playIni: 0, tIni: 0,
+  arr: null, ancla: 0, ultJ: null, ultM: null,
+};
+
+function setEstado(t) { $('estado').textContent = t; }
+function habilitar() {
+  const ok = !!S.est && !S.ocupado;
+  ['bEstirar', 'bPlay', 'bGuardar', 'bMenos', 'bMas'].forEach((id) => { $(id).disabled = !ok; });
+  $('bDeshacer').disabled = !ok || S.hist.length === 0;
+  $('bAbrir').disabled = S.ocupado;
+}
+function ocupar(t) { S.ocupado = true; if (t) setEstado(t); habilitar(); }
+function liberar() { S.ocupado = false; habilitar(); }
+
+// ---------- Geometria ----------
+function tam() { const r = cv.getBoundingClientRect(); return { W: r.width, H: r.height }; }
+function geom() {
+  const { W, H } = tam();
+  const plotH = Math.max(40, H - RULER - WAVE);
+  return { W, H, top: RULER, plotH, waveTop: RULER + plotH, rowH: plotH / (S.mHi - S.mLo) };
+}
+const xDeT = (t) => GUT + (t - S.t0) * S.pps;
+const tDeX = (x) => S.t0 + (x - GUT) / S.pps;
+const yDeMidi = (m, G) => G.top + (S.mHi - m) * G.rowH;
+function duracion() { return S.est ? S.est.mapa.length * S.fp / 1000 : 0; }
+
+function limitarScroll() {
+  const { W } = tam();
+  const visible = (W - GUT) / S.pps;
+  S.t0 = clamp(S.t0, 0, Math.max(0, duracion() - visible * 0.5));
+  const d = $('desp');
+  d.max = Math.max(0, duracion());
+  d.value = S.t0;
+}
+
+function ajustar() {
+  const r = cv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  cv.width = Math.round(r.width * d);
+  cv.height = Math.round(r.height * d);
+  cx.setTransform(d, 0, 0, d, 0, 0);
+  dibujar();
+}
+
+// ---------- Dibujo ----------
+function dibujar() {
+  const G = geom(), { W, H } = G;
+  cx.clearRect(0, 0, W, H);
+  cx.fillStyle = '#1d1d20';
+  cx.fillRect(0, 0, W, H);
+  if (!S.est) {
+    cx.fillStyle = '#888'; cx.font = '16px system-ui'; cx.textAlign = 'center';
+    cx.fillText('Abrí un audio para empezar', W / 2, H / 2);
+    return;
+  }
+  const fp = S.fp;
+
+  // Filas de notas (como un piano roll)
+  cx.font = '11px system-ui'; cx.textAlign = 'right'; cx.textBaseline = 'middle';
+  for (let m = Math.floor(S.mLo); m <= Math.ceil(S.mHi); m++) {
+    const y = yDeMidi(m, G);
+    if (y - G.rowH / 2 > G.waveTop || y + G.rowH / 2 < G.top) continue;
+    cx.fillStyle = Editor.esTeclaNegra(m) ? '#232327' : '#1d1d20';
+    cx.fillRect(GUT, y - G.rowH / 2, W - GUT, G.rowH);
+    if (m % 12 === 0) { cx.fillStyle = '#3a3a40'; cx.fillRect(GUT, y + G.rowH / 2 - 1, W - GUT, 1); }
+    if (G.rowH >= 9 || m % 12 === 0) {
+      cx.fillStyle = Editor.esTeclaNegra(m) ? '#777' : '#aaa';
+      cx.fillText(Editor.nombreNota(m), GUT - 5, y);
+    }
+  }
+
+  // Regla de tiempo
+  cx.fillStyle = '#38383d'; cx.fillRect(0, 0, W, RULER);
+  const pasos = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120];
+  let paso = pasos[pasos.length - 1];
+  for (const p of pasos) if (p * S.pps >= 70) { paso = p; break; }
+  cx.textAlign = 'left'; cx.textBaseline = 'middle'; cx.fillStyle = '#bbb'; cx.font = '11px system-ui';
+  for (let t = Math.ceil(S.t0 / paso) * paso; xDeT(t) < W; t += paso) {
+    const x = xDeT(t);
+    cx.fillStyle = '#2f2f34'; cx.fillRect(x, RULER, 1, G.plotH + WAVE);
+    cx.fillStyle = '#bbb'; cx.fillText(t.toFixed(paso < 1 ? 2 : 0) + ' s', x + 3, RULER / 2);
+  }
+
+  // Seleccion
+  if (S.sel) {
+    const x1 = xDeT(S.sel.a), x2 = xDeT(S.sel.b);
+    cx.fillStyle = 'rgba(255,165,0,0.25)';
+    cx.fillRect(x1, RULER, x2 - x1, G.plotH + WAVE);
+    cx.fillStyle = 'orange';
+    cx.fillRect(x1 - 1, RULER, 2, G.plotH + WAVE);
+    cx.fillRect(x2 - 1, RULER, 2, G.plotH + WAVE);
+  }
+
+  const jIni = Math.max(0, Math.floor(S.t0 * 1000 / fp) - 1);
+  const jFin = Math.min(S.est.mapa.length - 1, Math.ceil(tDeX(W) * 1000 / fp) + 1);
+
+  // Curvas de tono
+  cx.save();
+  cx.beginPath(); cx.rect(GUT, G.top, W - GUT, G.plotH); cx.clip();
+  if (S.hayTono) curva(S.curvaBase, '#777', 2, G, jIni, jFin);
+  curva(S.curvaAct, '#4da3ff', 3, G, jIni, jFin);
+  cx.restore();
+
+  // Onda (aproximada a partir del original, sigue las ediciones al instante)
+  const cy = G.waveTop + WAVE / 2, alto = WAVE / 2 - 4;
+  cx.fillStyle = '#16161a'; cx.fillRect(GUT, G.waveTop, W - GUT, WAVE);
+  cx.strokeStyle = '#6fbf73'; cx.lineWidth = 1; cx.beginPath();
+  const mapa = S.est.mapa, picos = S.picos, n = mapa.length;
+  for (let x = GUT; x < W; x++) {
+    const j0 = Math.floor(tDeX(x) * 1000 / fp), j1 = Math.ceil(tDeX(x + 1) * 1000 / fp);
+    if (j1 < 0 || j0 >= n) continue;
+    let pk = 0;
+    for (let j = Math.max(0, j0); j <= Math.min(n - 1, j1); j++) {
+      const v = picos[Math.round(mapa[j])] || 0;
+      if (v > pk) pk = v;
+    }
+    cx.moveTo(x + 0.5, cy - pk * alto); cx.lineTo(x + 0.5, cy + pk * alto);
+  }
+  cx.stroke();
+
+  // Cabezal de reproduccion
+  if (S.playT !== null) {
+    const x = xDeT(S.playT);
+    cx.fillStyle = '#ff5050'; cx.fillRect(x - 1, RULER, 2, G.plotH + WAVE);
+  }
+
+  // Columna de notas por encima
+  cx.fillStyle = '#38383d'; cx.fillRect(0, 0, GUT, H);
+  cx.textAlign = 'right'; cx.textBaseline = 'middle'; cx.font = '11px system-ui';
+  for (let m = Math.floor(S.mLo); m <= Math.ceil(S.mHi); m++) {
+    const y = yDeMidi(m, G);
+    if (y < G.top || y > G.waveTop) continue;
+    if (G.rowH >= 9 || m % 12 === 0) {
+      cx.fillStyle = Editor.esTeclaNegra(m) ? '#888' : '#ccc';
+      cx.fillText(Editor.nombreNota(m), GUT - 5, y);
+    }
+  }
+}
+
+function curva(c, color, ancho, G, jIni, jFin) {
+  if (!c) return;
+  cx.strokeStyle = color; cx.lineWidth = ancho; cx.lineJoin = 'round';
+  cx.beginPath();
+  let abierto = false;
+  for (let j = jIni; j <= jFin; j++) {
+    const f = c[j];
+    if (!(f > 0)) { abierto = false; continue; }
+    const x = xDeT(j * S.fp / 1000), y = yDeMidi(Editor.hzAMidi(f), G);
+    if (abierto) cx.lineTo(x, y); else { cx.moveTo(x, y); abierto = true; }
+  }
+  cx.stroke();
+}
+
+function recalcular() {
+  S.curvaAct = Editor.curvaPitch(S.f0, S.est, true);
+  S.curvaBase = Editor.curvaPitch(S.f0, S.est, false);
+  S.hayTono = false;
+  for (let j = 0; j < S.est.semis.length; j++) if (Math.abs(S.est.semis[j]) > 1e-9) { S.hayTono = true; break; }
+}
+
+// ---------- Abrir audio ----------
+$('bAbrir').onclick = () => $('archivo').click();
+$('archivo').onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) await abrir(f);
+};
+
+async function abrir(archivo) {
+  try {
+    parar();
+    ocupar('Leyendo audio…');
+    const fs = parseInt($('selFs').value, 10);
+    const ab = await archivo.arrayBuffer();
+    const tmp = new (window.AudioContext || window.webkitAudioContext)();
+    const dec = await tmp.decodeAudioData(ab);
+    tmp.close();
+    const off = new OfflineAudioContext(1, Math.max(1, Math.ceil(dec.duration * fs)), fs);
+    const fuente = off.createBufferSource();
+    fuente.buffer = dec; fuente.connect(off.destination); fuente.start();
+    const rend = await off.startRendering();
+    const x = Float64Array.from(rend.getChannelData(0));
+
+    const seg = x.length / fs;
+    const cuadros = seg * 1000 / S.fp;
+    const bins = fs <= 24000 ? 513 : 1025;
+    const mb = cuadros * bins * 8 * 4 / 1e6;
+    if (mb > 500 && !confirm('Este audio necesita unos ' + Math.round(mb) + ' MB de memoria. ' +
+        'En un teléfono puede fallar. ¿Continuar? (Probá con menos calidad o un audio más corto.)')) {
+      liberar(); setEstado('Cancelado.'); return;
+    }
+
+    // Picos por cuadro (para dibujar la onda)
+    const por = Math.max(1, Math.round(fs * S.fp / 1000));
+    const picos = new Float32Array(Math.ceil(x.length / por) + 2);
+    let maxAbs = 1e-9;
+    for (let i = 0; i < x.length; i++) maxAbs = Math.max(maxAbs, Math.abs(x[i]));
+    for (let i = 0; i < x.length; i++) {
+      const k = (i / por) | 0, v = Math.abs(x[i]) / maxAbs;
+      if (v > picos[k]) picos[k] = v;
+    }
+
+    setEstado('Analizando con WORLD… (puede tardar un rato en audios largos)');
+    const r = await llamar({
+      cmd: 'analizar', x, fs, fp: S.fp,
+      f0min: parseFloat($('f0min').value), f0max: parseFloat($('f0max').value),
+      harvest: $('selAn').value === '1',
+    }, [x.buffer]);
+
+    S.fs = fs; S.f0 = r.f0; S.picos = picos;
+    S.est = Editor.estadoInicial(r.cuadros);
+    S.hist = []; S.sel = null; S.rendered = null; S.sucio = true; S.t0 = 0;
+    const { W } = tam();
+    S.pps = clamp((W - GUT) / Math.max(1, Math.min(seg, 8)), 10, 5000);
+
+    let lo = 1e9, hi = -1e9;
+    for (let i = 0; i < S.f0.length; i++) if (S.f0[i] > 0) {
+      const m = Editor.hzAMidi(S.f0[i]); lo = Math.min(lo, m); hi = Math.max(hi, m);
+    }
+    if (lo > hi) { lo = 52; hi = 76; }
+    S.mLo = Math.floor(lo) - 6; S.mHi = Math.ceil(hi) + 6;
+    if (S.mHi - S.mLo < 24) { const c = (S.mHi + S.mLo) / 2; S.mLo = Math.floor(c - 12); S.mHi = Math.ceil(c + 12); }
+
+    recalcular(); limitarScroll(); liberar(); dibujar();
+    setEstado('Listo. Arrastrá sobre la onda para elegir un tramo y apretá Estirar.');
+  } catch (err) {
+    liberar();
+    setEstado('No se pudo abrir el audio: ' + err.message);
+  }
+}
+
+// ---------- Historial ----------
+function guardarHist() {
+  S.hist.push({ est: Editor.copiar(S.est), sel: S.sel ? { a: S.sel.a, b: S.sel.b } : null });
+  if (S.hist.length > 40) S.hist.shift();
+  habilitar();
+}
+$('bDeshacer').onclick = () => {
+  if (!S.hist.length || S.ocupado) return;
+  const h = S.hist.pop();
+  S.est = h.est; S.sel = h.sel; S.sucio = true;
+  recalcular(); limitarScroll(); habilitar(); dibujar();
+  setEstado('Deshecho.');
+};
+
+// ---------- Estirar ----------
+$('bEstirar').onclick = () => {
+  if (!S.est || S.ocupado) return;
+  if (!S.sel) { setEstado('Primero arrastrá sobre la onda para elegir el tramo.'); return; }
+  const factor = parseFloat($('factor').value);
+  if (!(factor > 0)) { setEstado('El factor no es válido.'); return; }
+  const conservar = $('conservar').checked;
+  const r = Editor.estirar(S.est, S.sel.a * 1000 / S.fp, S.sel.b * 1000 / S.fp, factor, conservar);
+  if (!r) { setEstado('El tramo es demasiado corto.'); return; }
+  guardarHist();
+  S.est = r.est;
+  S.sel = { a: r.nuevoA * S.fp / 1000, b: r.nuevoB * S.fp / 1000 };
+  if (!conservar) S.t0 = 0;
+  S.sucio = true;
+  recalcular(); limitarScroll(); dibujar();
+  setEstado('Tramo estirado x' + factor + '. Apretá Reproducir para escucharlo (se sintetiza en ese momento).');
+};
+
+// ---------- Sintesis, reproduccion, guardado ----------
+async function renderizar() {
+  setEstado('Sintetizando con WORLD…');
+  const e = S.est;
+  const mapa = e.mapa.slice(), semis = e.semis.slice(), form = e.form.slice();
+  const r = await llamar({ cmd: 'render', mapa, semis, form }, [mapa.buffer, semis.buffer, form.buffer]);
+  let pico = 0;
+  for (let i = 0; i < r.y.length; i++) pico = Math.max(pico, Math.abs(r.y[i]));
+  if (pico > 0.99) { const g = 0.99 / pico; for (let i = 0; i < r.y.length; i++) r.y[i] *= g; }
+  S.rendered = r.y; S.sucio = false;
+}
+
+async function asegurarRender() {
+  if (!S.sucio && S.rendered) return true;
+  try { ocupar(); await renderizar(); liberar(); return true; }
+  catch (err) { liberar(); setEstado('Error al sintetizar: ' + err.message); return false; }
+}
+
+async function reproducir() {
+  if (S.sonando) { parar(); return; }
+  if (!S.est || S.ocupado) return;
+  if (!(await asegurarRender())) return;
+  const ctx = S.ac || (S.ac = new (window.AudioContext || window.webkitAudioContext)());
+  if (ctx.state === 'suspended') await ctx.resume();
+  const buf = ctx.createBuffer(1, S.rendered.length, S.fs);
+  buf.copyToChannel(S.rendered, 0);
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination);
+  const dur = S.rendered.length / S.fs;
+  const ini = S.sel ? clamp(S.sel.a, 0, Math.max(0, dur - 0.05)) : 0;
+  const fin = S.sel ? clamp(S.sel.b, ini + 0.05, dur) : dur;
+  src.start(0, ini, fin - ini);
+  S.src = src; S.sonando = true; S.playIni = ini; S.tIni = ctx.currentTime;
+  src.onended = () => { if (S.src === src) parar(); };
+  $('bPlay').textContent = '■ Detener';
+  setEstado('Reproduciendo…');
+  animar();
+}
+function parar() {
+  if (S.src) { try { S.src.stop(); } catch (_) { /* ya parado */ } S.src = null; }
+  S.sonando = false; S.playT = null;
+  $('bPlay').textContent = '▶ Reproducir';
+  dibujar();
+}
+function animar() {
+  if (!S.sonando) return;
+  S.playT = S.playIni + (S.ac.currentTime - S.tIni);
+  dibujar();
+  requestAnimationFrame(animar);
+}
+$('bPlay').onclick = reproducir;
+
+$('bGuardar').onclick = async () => {
+  if (!S.est || S.ocupado) return;
+  if (!(await asegurarRender())) return;
+  const w = Editor.aWav(S.rendered, S.fs);
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([w], { type: 'audio/wav' }));
+  a.download = 'estirado.wav';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  setEstado('Guardado como estirado.wav');
+};
+
+// ---------- Herramientas ----------
+function herramienta(h) {
+  S.herr = h;
+  $('tSel').classList.toggle('on', h === 'sel');
+  $('tTono').classList.toggle('on', h === 'tono');
+  setEstado(h === 'sel' ? 'Seleccionar: arrastrá para elegir un tramo; arrastrá los bordes naranjas para ajustarlo.'
+                        : 'Tono: arrastrá sobre las notas para dibujar el tono (solo donde hay voz).');
+}
+$('tSel').onclick = () => herramienta('sel');
+$('tTono').onclick = () => herramienta('tono');
+
+function zoom(f) {
+  const { W } = tam();
+  const centro = tDeX((W + GUT) / 2);
+  S.pps = clamp(S.pps * f, 10, 5000);
+  S.t0 = centro - ((W + GUT) / 2 - GUT) / S.pps;
+  limitarScroll(); dibujar();
+}
+$('bMas').onclick = () => zoom(1.5);
+$('bMenos').onclick = () => zoom(1 / 1.5);
+$('desp').oninput = (e) => { S.t0 = parseFloat(e.target.value); dibujar(); };
+
+// ---------- Mouse / dedo sobre el lienzo ----------
+function pos(e) { const r = cv.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+
+function ponerTono(p) {
+  const G = geom();
+  const j = Math.floor(tDeX(p.x) * 1000 / S.fp);
+  const midi = clamp(S.mHi - (p.y - G.top) / G.rowH, S.mLo, S.mHi);
+  const j0 = S.ultJ === null ? j : S.ultJ, m0 = S.ultM === null ? midi : S.ultM;
+  const a = Math.min(j0, j), b = Math.max(j0, j);
+  for (let k = a; k <= b; k++) {
+    const u = j === j0 ? 1 : (k - j0) / (j - j0);
+    Editor.fijarTono(S.est, S.f0, k, k, Editor.midiAHz(m0 + (midi - m0) * u));
+  }
+  S.ultJ = j; S.ultM = midi;
+  recalcular(); dibujar();
+}
+
+cv.addEventListener('pointerdown', (e) => {
+  if (!S.est || S.ocupado) return;
+  cv.setPointerCapture(e.pointerId);
+  const p = pos(e);
+  if (p.x < GUT) return;
+  if (S.herr === 'sel') {
+    const t = clamp(tDeX(p.x), 0, duracion()), tol = 10 / S.pps;
+    if (S.sel && Math.abs(t - S.sel.a) < tol) S.ancla = S.sel.b;
+    else if (S.sel && Math.abs(t - S.sel.b) < tol) S.ancla = S.sel.a;
+    else { S.ancla = t; S.sel = { a: t, b: t }; }
+    S.arr = 'sel';
+  } else {
+    guardarHist(); S.arr = 'tono'; S.ultJ = null; S.ultM = null;
+    ponerTono(p);
+  }
+  dibujar();
+});
+cv.addEventListener('pointermove', (e) => {
+  if (!S.arr) return;
+  const p = pos(e);
+  if (S.arr === 'sel') {
+    const t = clamp(tDeX(p.x), 0, duracion());
+    S.sel = { a: Math.min(S.ancla, t), b: Math.max(S.ancla, t) };
+    dibujar();
+  } else {
+    ponerTono(p);
+  }
+});
+function soltar() {
+  if (!S.arr) return;
+  if (S.arr === 'sel' && S.sel && S.sel.b - S.sel.a < 0.02) S.sel = null;
+  if (S.arr === 'tono') S.sucio = true;
+  S.arr = null;
+  habilitar(); dibujar();
+}
+cv.addEventListener('pointerup', soltar);
+cv.addEventListener('pointercancel', soltar);
+
+cv.addEventListener('wheel', (e) => {
+  if (!S.est) return;
+  e.preventDefault();
+  if (e.ctrlKey || e.metaKey) {
+    const p = pos(e), t = tDeX(p.x);
+    S.pps = clamp(S.pps * (e.deltaY < 0 ? 1.2 : 1 / 1.2), 10, 5000);
+    S.t0 = t - (p.x - GUT) / S.pps;
+  } else {
+    S.t0 += (Math.abs(e.deltaX) > Math.abs(e.deltaY) ? e.deltaX : e.deltaY) / S.pps;
+  }
+  limitarScroll(); dibujar();
+}, { passive: false });
+
+window.addEventListener('resize', ajustar);
+ajustar();
+habilitar();
+})();
+</script>
+</body>
+</html>

@@ -16,7 +16,7 @@ W=third_party/world/src
 EXPORTADAS=_w_analizar,_w_cuadros,_w_bins,_w_fft_size,_w_frame_period,_w_fs,_w_f0_ptr,\
 _w_mapa_estirar,_w_largo_salida,_w_render,_w_liberar,_malloc,_free
 
-emcc -O3 -std=c++14 -I"$W" \
+em++ -O3 -std=c++14 -I"$W" \
   src/world_wasm.cpp \
   "$W/cheaptrick.cpp" "$W/codec.cpp" "$W/common.cpp" "$W/d4c.cpp" "$W/dio.cpp" \
   "$W/fft.cpp" "$W/harvest.cpp" "$W/matlabfunctions.cpp" "$W/stonemask.cpp" "$W/synthesis.cpp" \

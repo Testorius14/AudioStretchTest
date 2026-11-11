@@ -4,13 +4,19 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Estirador vocal</title>
+<meta name="theme-color" content="#2a2a2e">
+<meta name="description" content="Editor de voz en el navegador: estirar, cortar, mover y afinar notas, con WORLD.">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
 <style>
   :root { --bg:#2a2a2e; --panel:#38383d; --borde:#555; --texto:#ddd; --acento:#4da3ff; }
   * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body { margin: 0; background: var(--bg); color: var(--texto); font: 14px system-ui, sans-serif;
          display: flex; flex-direction: column; }
-  #barra { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px;
+  .barra { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 6px;
            background: var(--panel); border-bottom: 1px solid var(--borde); }
   button, select, input { background: #222; color: var(--texto); border: 1px solid var(--borde);
            border-radius: 4px; padding: 6px 10px; font: inherit; }
@@ -18,6 +24,7 @@
   button.on { background: var(--acento); color: #000; }
   button:disabled { opacity: .4; }
   input[type=number] { width: 68px; }
+  input[type=checkbox] { padding: 0; }
   label { display: flex; align-items: center; gap: 4px; }
   .sep { width: 1px; height: 24px; background: var(--borde); margin: 0 4px; }
   #zona { flex: 1; position: relative; min-height: 200px; }
@@ -26,12 +33,26 @@
          border-top: 1px solid var(--borde); }
   #desp { flex: 1; min-width: 80px; padding: 0; }
   #estado { flex: 3; font-size: 13px; }
+  /* En pantallas angostas cada barra es una sola fila que se desliza con el dedo,
+     asi el area de edicion queda lo mas grande posible. */
+  @media (max-width: 760px) {
+    .barra { flex-wrap: nowrap; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: thin; }
+    .barra > * { flex: none; }
+    button, select, input { padding: 8px 12px; }
+    #pie { flex-direction: column; align-items: stretch; gap: 4px; }
+    #desp { flex: none; width: 100%; }
+    #estado { flex: none; }
+  }
 </style>
 </head>
 <body>
-<div id="barra">
-  <button id="bAbrir">Abrir audio</button>
+<div class="barra" id="barra1">
+  <button id="bAbrir" title="Abrir un audio (wav, mp3, etc.)">Abrir audio</button>
   <input type="file" id="archivo" accept="audio/*" hidden>
+  <button id="bAbrirProy" title="Seguir con un proyecto guardado antes">Abrir proyecto</button>
+  <input type="file" id="archivoProy" hidden>
+  <button id="bGuardarProy" disabled title="Guarda el audio y todas tus ediciones en un archivo para seguir después">Guardar proyecto</button>
+  <span class="sep"></span>
   <select id="selFs" title="Calidad (más alta = más memoria)">
     <option value="22050">22 kHz</option>
     <option value="32000">32 kHz</option>
@@ -43,15 +64,31 @@
   </select>
   <label>Tono <input type="number" id="f0min" value="71" min="40" max="400"> a
     <input type="number" id="f0max" value="800" min="200" max="2000"> Hz</label>
-  <span class="sep"></span>
-  <button id="tSel" class="on">Seleccionar</button>
-  <button id="tTono">Tono</button>
+  <button id="bInstalar" hidden title="Instalar como app en este dispositivo">Instalar app</button>
+</div>
+<div class="barra" id="barra2">
+  <button id="tSel" class="on" title="Arrastrá sobre la onda para elegir un tramo">Seleccionar</button>
+  <button id="tTono" title="Dibujá el tono con el dedo sobre las notas">Tono</button>
+  <button id="tCortar" title="Tocá donde quieras partir el audio en segmentos">Cortar</button>
+  <button id="tMover" title="Tocá un segmento y arrastralo en el tiempo">Mover</button>
   <span class="sep"></span>
   <label>Factor <input type="number" id="factor" value="2" step="0.1" min="0.1"></label>
   <label><input type="checkbox" id="conservar" checked> Conservar resto</label>
   <button id="bEstirar" disabled>Estirar</button>
-  <button id="bDeshacer" disabled>Deshacer</button>
   <span class="sep"></span>
+  <button id="bBorrar" disabled title="Borra el segmento elegido (herramienta Mover) o el tramo seleccionado">Borrar</button>
+  <label><input type="checkbox" id="cerrar" checked> Cerrar hueco</label>
+  <span class="sep"></span>
+  <button id="bAfinar" disabled title="Lleva cada nota cantada a su nota exacta (en la selección, o en todo el audio si no hay selección)">Afinar a la nota</button>
+  <select id="modoAfinar" title="Cómo dejar cada nota">
+    <option value="0">Nota exacta (plana)</option>
+    <option value="0.5">Con algo de vibrato</option>
+    <option value="1">Solo corregir desafinación</option>
+  </select>
+  <label title="Cuánto se acerca a la nota exacta"><input type="number" id="fuerza" value="100" min="0" max="100" step="5">%</label>
+  <button id="bTonoOrig" disabled title="Vuelve al tono original en la selección (o en todo el audio)">Tono original</button>
+  <span class="sep"></span>
+  <button id="bDeshacer" disabled>Deshacer</button>
   <button id="bPlay" disabled>▶ Reproducir</button>
   <button id="bGuardar" disabled>Guardar WAV</button>
   <span class="sep"></span>
@@ -96,20 +133,25 @@ function llamar(msg, transfer) {
 
 // ---------- Estado ----------
 const S = {
-  fs: 22050, fp: 5, f0: null, picos: null, est: null, hist: [], sel: null,
+  fs: 22050, fp: 5, f0: null, picos: null, est: null, hist: [], sel: null, seg: null,
   t0: 0, pps: 100, herr: 'sel', mLo: 48, mHi: 84,
   curvaAct: null, curvaBase: null, hayTono: false,
   rendered: null, sucio: false, ocupado: false,
   ac: null, src: null, sonando: false, playT: null, playIni: 0, tIni: 0,
   arr: null, ancla: 0, ultJ: null, ultM: null,
+  cortePrev: null, moverX0: 0, moverDelta: 0,
+  audio16: null, par: null, cuadrosOrig: 0, nombre: 'audio',
 };
+window.estirador = { estado: () => S };  // solo para pruebas automaticas
 
 function setEstado(t) { $('estado').textContent = t; }
 function habilitar() {
   const ok = !!S.est && !S.ocupado;
-  ['bEstirar', 'bPlay', 'bGuardar', 'bMenos', 'bMas'].forEach((id) => { $(id).disabled = !ok; });
+  ['bEstirar', 'bPlay', 'bGuardar', 'bMenos', 'bMas', 'bBorrar', 'bAfinar', 'bTonoOrig', 'bGuardarProy']
+    .forEach((id) => { $(id).disabled = !ok; });
   $('bDeshacer').disabled = !ok || S.hist.length === 0;
   $('bAbrir').disabled = S.ocupado;
+  $('bAbrirProy').disabled = S.ocupado;
 }
 function ocupar(t) { S.ocupado = true; if (t) setEstado(t); habilitar(); }
 function liberar() { S.ocupado = false; habilitar(); }
@@ -124,6 +166,8 @@ function geom() {
 const xDeT = (t) => GUT + (t - S.t0) * S.pps;
 const tDeX = (x) => S.t0 + (x - GUT) / S.pps;
 const yDeMidi = (m, G) => G.top + (S.mHi - m) * G.rowH;
+const frameDeX = (x) => Math.round(tDeX(x) * 1000 / S.fp);
+const xDeFrame = (j) => xDeT(j * S.fp / 1000);
 function duracion() { return S.est ? S.est.mapa.length * S.fp / 1000 : 0; }
 
 function limitarScroll() {
@@ -155,6 +199,8 @@ function dibujar() {
     return;
   }
   const fp = S.fp;
+  const jIni = Math.max(0, Math.floor(S.t0 * 1000 / fp) - 1);
+  const jFin = Math.min(S.est.mapa.length - 1, Math.ceil(tDeX(W) * 1000 / fp) + 1);
 
   // Filas de notas (como un piano roll)
   cx.font = '11px system-ui'; cx.textAlign = 'right'; cx.textBaseline = 'middle';
@@ -164,36 +210,39 @@ function dibujar() {
     cx.fillStyle = Editor.esTeclaNegra(m) ? '#232327' : '#1d1d20';
     cx.fillRect(GUT, y - G.rowH / 2, W - GUT, G.rowH);
     if (m % 12 === 0) { cx.fillStyle = '#3a3a40'; cx.fillRect(GUT, y + G.rowH / 2 - 1, W - GUT, 1); }
-    if (G.rowH >= 9 || m % 12 === 0) {
-      cx.fillStyle = Editor.esTeclaNegra(m) ? '#777' : '#aaa';
-      cx.fillText(Editor.nombreNota(m), GUT - 5, y);
-    }
   }
+  cx.fillStyle = '#16161a'; cx.fillRect(GUT, G.waveTop, W - GUT, WAVE);
 
   // Regla de tiempo
   cx.fillStyle = '#38383d'; cx.fillRect(0, 0, W, RULER);
   const pasos = [0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 5, 10, 30, 60, 120];
   let paso = pasos[pasos.length - 1];
   for (const p of pasos) if (p * S.pps >= 70) { paso = p; break; }
-  cx.textAlign = 'left'; cx.textBaseline = 'middle'; cx.fillStyle = '#bbb'; cx.font = '11px system-ui';
+  cx.textAlign = 'left'; cx.textBaseline = 'middle'; cx.font = '11px system-ui';
   for (let t = Math.ceil(S.t0 / paso) * paso; xDeT(t) < W; t += paso) {
     const x = xDeT(t);
     cx.fillStyle = '#2f2f34'; cx.fillRect(x, RULER, 1, G.plotH + WAVE);
     cx.fillStyle = '#bbb'; cx.fillText(t.toFixed(paso < 1 ? 2 : 0) + ' s', x + 3, RULER / 2);
   }
 
-  // Seleccion
+  // Seleccion de tiempo
   if (S.sel) {
-    const x1 = xDeT(S.sel.a), x2 = xDeT(S.sel.b);
     cx.fillStyle = 'rgba(255,165,0,0.25)';
-    cx.fillRect(x1, RULER, x2 - x1, G.plotH + WAVE);
-    cx.fillStyle = 'orange';
-    cx.fillRect(x1 - 1, RULER, 2, G.plotH + WAVE);
-    cx.fillRect(x2 - 1, RULER, 2, G.plotH + WAVE);
+    cx.fillRect(xDeT(S.sel.a), RULER, xDeT(S.sel.b) - xDeT(S.sel.a), G.plotH + WAVE);
   }
-
-  const jIni = Math.max(0, Math.floor(S.t0 * 1000 / fp) - 1);
-  const jFin = Math.min(S.est.mapa.length - 1, Math.ceil(tDeX(W) * 1000 / fp) + 1);
+  // Silencios (huecos)
+  cx.fillStyle = 'rgba(0,0,0,0.5)';
+  let ini = -1;
+  for (let j = jIni; j <= jFin + 1; j++) {
+    const sil = j <= jFin && S.est.mapa[j] < 0;
+    if (sil && ini < 0) ini = j;
+    if (!sil && ini >= 0) { cx.fillRect(xDeFrame(ini), RULER, (j - ini) * fp / 1000 * S.pps, G.plotH + WAVE); ini = -1; }
+  }
+  // Segmento elegido
+  if (S.seg && S.herr === 'mover') {
+    cx.fillStyle = 'rgba(77,163,255,0.2)';
+    cx.fillRect(xDeFrame(S.seg.c0), RULER, (S.seg.c1 - S.seg.c0) * fp / 1000 * S.pps, G.plotH + WAVE);
+  }
 
   // Curvas de tono
   cx.save();
@@ -204,7 +253,6 @@ function dibujar() {
 
   // Onda (aproximada a partir del original, sigue las ediciones al instante)
   const cy = G.waveTop + WAVE / 2, alto = WAVE / 2 - 4;
-  cx.fillStyle = '#16161a'; cx.fillRect(GUT, G.waveTop, W - GUT, WAVE);
   cx.strokeStyle = '#6fbf73'; cx.lineWidth = 1; cx.beginPath();
   const mapa = S.est.mapa, picos = S.picos, n = mapa.length;
   for (let x = GUT; x < W; x++) {
@@ -212,6 +260,7 @@ function dibujar() {
     if (j1 < 0 || j0 >= n) continue;
     let pk = 0;
     for (let j = Math.max(0, j0); j <= Math.min(n - 1, j1); j++) {
+      if (mapa[j] < 0) continue;
       const v = picos[Math.round(mapa[j])] || 0;
       if (v > pk) pk = v;
     }
@@ -219,10 +268,39 @@ function dibujar() {
   }
   cx.stroke();
 
+  // Bordes de la seleccion de tiempo
+  if (S.sel) {
+    cx.fillStyle = 'orange';
+    cx.fillRect(xDeT(S.sel.a) - 1, RULER, 2, G.plotH + WAVE);
+    cx.fillRect(xDeT(S.sel.b) - 1, RULER, 2, G.plotH + WAVE);
+  }
+  // Cortes
+  cx.fillStyle = 'rgba(230,230,230,0.75)';
+  for (const c of S.est.cortes) {
+    if (c < jIni - 1 || c > jFin + 1) continue;
+    const x = xDeFrame(c);
+    cx.fillRect(x - 0.5, RULER, 1, G.plotH + WAVE);
+    cx.beginPath(); cx.moveTo(x - 5, RULER); cx.lineTo(x + 5, RULER); cx.lineTo(x, RULER + 7); cx.closePath(); cx.fill();
+  }
+  // Vista previa al mover un segmento
+  if (S.arr === 'mover' && S.seg && S.moverDelta) {
+    const a = Math.max(0, S.seg.c0 + S.moverDelta), b = a + (S.seg.c1 - S.seg.c0);
+    cx.fillStyle = 'rgba(255,255,255,0.18)';
+    cx.fillRect(xDeFrame(a), RULER, (b - a) * fp / 1000 * S.pps, G.plotH + WAVE);
+    cx.strokeStyle = '#fff'; cx.setLineDash([5, 4]); cx.lineWidth = 1.5;
+    cx.strokeRect(xDeFrame(a), RULER + 1, (b - a) * fp / 1000 * S.pps, G.plotH + WAVE - 2);
+    cx.setLineDash([]);
+  }
+  // Vista previa del corte
+  if (S.arr === 'cortar' && S.cortePrev !== null) {
+    const x = xDeFrame(S.cortePrev);
+    cx.strokeStyle = '#ffe066'; cx.setLineDash([6, 4]); cx.lineWidth = 2;
+    cx.beginPath(); cx.moveTo(x, RULER); cx.lineTo(x, RULER + G.plotH + WAVE); cx.stroke();
+    cx.setLineDash([]);
+  }
   // Cabezal de reproduccion
   if (S.playT !== null) {
-    const x = xDeT(S.playT);
-    cx.fillStyle = '#ff5050'; cx.fillRect(x - 1, RULER, 2, G.plotH + WAVE);
+    cx.fillStyle = '#ff5050'; cx.fillRect(xDeT(S.playT) - 1, RULER, 2, G.plotH + WAVE);
   }
 
   // Columna de notas por encima
@@ -246,7 +324,7 @@ function curva(c, color, ancho, G, jIni, jFin) {
   for (let j = jIni; j <= jFin; j++) {
     const f = c[j];
     if (!(f > 0)) { abierto = false; continue; }
-    const x = xDeT(j * S.fp / 1000), y = yDeMidi(Editor.hzAMidi(f), G);
+    const x = xDeFrame(j), y = yDeMidi(Editor.hzAMidi(f), G);
     if (abierto) cx.lineTo(x, y); else { cx.moveTo(x, y); abierto = true; }
   }
   cx.stroke();
@@ -259,12 +337,18 @@ function recalcular() {
   for (let j = 0; j < S.est.semis.length; j++) if (Math.abs(S.est.semis[j]) > 1e-9) { S.hayTono = true; break; }
 }
 
-// ---------- Abrir audio ----------
+// ---------- Abrir audio o proyecto ----------
 $('bAbrir').onclick = () => $('archivo').click();
 $('archivo').onchange = async (e) => {
   const f = e.target.files[0];
   e.target.value = '';
   if (f) await abrir(f);
+};
+$('bAbrirProy').onclick = () => $('archivoProy').click();
+$('archivoProy').onchange = async (e) => {
+  const f = e.target.files[0];
+  e.target.value = '';
+  if (f) await abrirProyecto(f);
 };
 
 async function abrir(archivo) {
@@ -280,55 +364,112 @@ async function abrir(archivo) {
     const fuente = off.createBufferSource();
     fuente.buffer = dec; fuente.connect(off.destination); fuente.start();
     const rend = await off.startRendering();
-    const x = Float64Array.from(rend.getChannelData(0));
-
-    const seg = x.length / fs;
-    const cuadros = seg * 1000 / S.fp;
-    const bins = fs <= 24000 ? 513 : 1025;
-    const mb = cuadros * bins * 8 * 4 / 1e6;
-    if (mb > 500 && !confirm('Este audio necesita unos ' + Math.round(mb) + ' MB de memoria. ' +
-        'En un teléfono puede fallar. ¿Continuar? (Probá con menos calidad o un audio más corto.)')) {
-      liberar(); setEstado('Cancelado.'); return;
-    }
-
-    // Picos por cuadro (para dibujar la onda)
-    const por = Math.max(1, Math.round(fs * S.fp / 1000));
-    const picos = new Float32Array(Math.ceil(x.length / por) + 2);
-    let maxAbs = 1e-9;
-    for (let i = 0; i < x.length; i++) maxAbs = Math.max(maxAbs, Math.abs(x[i]));
-    for (let i = 0; i < x.length; i++) {
-      const k = (i / por) | 0, v = Math.abs(x[i]) / maxAbs;
-      if (v > picos[k]) picos[k] = v;
-    }
-
-    setEstado('Analizando con WORLD… (puede tardar un rato en audios largos)');
-    const r = await llamar({
-      cmd: 'analizar', x, fs, fp: S.fp,
+    const datos = rend.getChannelData(0);
+    // Se guarda en 16 bits: es lo que va al proyecto, y se analiza exactamente eso,
+    // asi al reabrir el proyecto el analisis da lo mismo.
+    const audio16 = new Int16Array(datos.length);
+    for (let i = 0; i < datos.length; i++) audio16[i] = Math.round(clamp(datos[i], -1, 1) * 32767);
+    await cargar(audio16, fs, {
       f0min: parseFloat($('f0min').value), f0max: parseFloat($('f0max').value),
       harvest: $('selAn').value === '1',
-    }, [x.buffer]);
-
-    S.fs = fs; S.f0 = r.f0; S.picos = picos;
-    S.est = Editor.estadoInicial(r.cuadros);
-    S.hist = []; S.sel = null; S.rendered = null; S.sucio = true; S.t0 = 0;
-    const { W } = tam();
-    S.pps = clamp((W - GUT) / Math.max(1, Math.min(seg, 8)), 10, 5000);
-
-    let lo = 1e9, hi = -1e9;
-    for (let i = 0; i < S.f0.length; i++) if (S.f0[i] > 0) {
-      const m = Editor.hzAMidi(S.f0[i]); lo = Math.min(lo, m); hi = Math.max(hi, m);
-    }
-    if (lo > hi) { lo = 52; hi = 76; }
-    S.mLo = Math.floor(lo) - 6; S.mHi = Math.ceil(hi) + 6;
-    if (S.mHi - S.mLo < 24) { const c = (S.mHi + S.mLo) / 2; S.mLo = Math.floor(c - 12); S.mHi = Math.ceil(c + 12); }
-
-    recalcular(); limitarScroll(); liberar(); dibujar();
-    setEstado('Listo. Arrastrá sobre la onda para elegir un tramo y apretá Estirar.');
+    }, null, archivo.name.replace(/\.[^.]*$/, '') || 'audio');
   } catch (err) {
     liberar();
     setEstado('No se pudo abrir el audio: ' + err.message);
   }
 }
+
+async function abrirProyecto(archivo) {
+  try {
+    parar();
+    ocupar('Leyendo proyecto…');
+    const p = Editor.leerProyecto(await archivo.arrayBuffer());
+    if ([...$('selFs').options].some((o) => o.value === String(p.fs))) $('selFs').value = String(p.fs);
+    $('selAn').value = p.harvest ? '1' : '0';
+    $('f0min').value = p.f0min; $('f0max').value = p.f0max;
+    S.fp = p.fp || 5;
+    await cargar(p.audio, p.fs, { f0min: p.f0min, f0max: p.f0max, harvest: p.harvest }, p.est,
+                 archivo.name.replace(/\.[^.]*$/, '') || 'proyecto');
+  } catch (err) {
+    liberar();
+    setEstado('No se pudo abrir el proyecto: ' + err.message);
+  }
+}
+
+// Analiza el audio con WORLD y deja todo listo para editar. Si viene `estRestaurado`
+// (proyecto guardado), se conservan sus ediciones.
+async function cargar(audio16, fs, par, estRestaurado, nombre) {
+  const x = new Float64Array(audio16.length);
+  for (let i = 0; i < x.length; i++) x[i] = audio16[i] / 32768;
+
+  const seg = x.length / fs;
+  const cuadros = seg * 1000 / S.fp;
+  const bins = fs <= 24000 ? 513 : 1025;
+  const mb = cuadros * bins * 8 * 4 / 1e6;
+  if (mb > 500 && !confirm('Este audio necesita unos ' + Math.round(mb) + ' MB de memoria. ' +
+      'En un teléfono puede fallar. ¿Continuar? (Probá con menos calidad o un audio más corto.)')) {
+    liberar(); setEstado('Cancelado.'); return;
+  }
+
+  // Picos por cuadro (para dibujar la onda)
+  const por = Math.max(1, Math.round(fs * S.fp / 1000));
+  const picos = new Float32Array(Math.ceil(x.length / por) + 2);
+  let maxAbs = 1e-9;
+  for (let i = 0; i < x.length; i++) maxAbs = Math.max(maxAbs, Math.abs(x[i]));
+  for (let i = 0; i < x.length; i++) {
+    const k = (i / por) | 0, v = Math.abs(x[i]) / maxAbs;
+    if (v > picos[k]) picos[k] = v;
+  }
+
+  setEstado('Analizando con WORLD… (puede tardar un rato en audios largos)');
+  const r = await llamar({
+    cmd: 'analizar', x, fs, fp: S.fp, f0min: par.f0min, f0max: par.f0max, harvest: par.harvest,
+  }, [x.buffer]);
+
+  let est = Editor.estadoInicial(r.cuadros);
+  if (estRestaurado) {
+    let mx = -1;
+    for (let j = 0; j < estRestaurado.mapa.length; j++) if (estRestaurado.mapa[j] > mx) mx = estRestaurado.mapa[j];
+    if (mx > r.cuadros - 1 + 1e-6) throw new Error('el proyecto no coincide con el análisis del audio');
+    est = estRestaurado;
+  }
+
+  S.fs = fs; S.f0 = r.f0; S.picos = picos; S.audio16 = audio16; S.par = par;
+  S.cuadrosOrig = r.cuadros; S.nombre = nombre; S.est = est;
+  S.hist = []; S.sel = null; S.seg = null; S.rendered = null; S.sucio = true; S.t0 = 0;
+  const { W } = tam();
+  S.pps = clamp((W - GUT) / Math.max(1, Math.min(duracion(), 8)), 10, 5000);
+
+  let lo = 1e9, hi = -1e9;
+  for (let i = 0; i < S.f0.length; i++) if (S.f0[i] > 0) {
+    const m = Editor.hzAMidi(S.f0[i]); lo = Math.min(lo, m); hi = Math.max(hi, m);
+  }
+  if (lo > hi) { lo = 52; hi = 76; }
+  S.mLo = Math.floor(lo) - 6; S.mHi = Math.ceil(hi) + 6;
+  if (S.mHi - S.mLo < 24) { const c = (S.mHi + S.mLo) / 2; S.mLo = Math.floor(c - 12); S.mHi = Math.ceil(c + 12); }
+
+  recalcular(); limitarScroll(); liberar(); dibujar();
+  setEstado(estRestaurado ? 'Proyecto abierto. Seguí donde lo dejaste.'
+                          : 'Listo. Arrastrá sobre la onda para elegir un tramo y apretá Estirar.');
+}
+
+function descargar(buffer, nombre, tipo) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([buffer], { type: tipo }));
+  a.download = nombre;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+}
+
+$('bGuardarProy').onclick = () => {
+  if (!S.est || S.ocupado) return;
+  const buf = Editor.guardarProyecto({
+    fs: S.fs, fp: S.fp, f0min: S.par.f0min, f0max: S.par.f0max, harvest: S.par.harvest,
+    cuadrosOrig: S.cuadrosOrig, audio: S.audio16, est: S.est,
+  });
+  descargar(buf, S.nombre + '.estirador', 'application/octet-stream');
+  setEstado('Proyecto guardado como ' + S.nombre + '.estirador. Para seguir después, usá "Abrir proyecto".');
+};
 
 // ---------- Historial ----------
 function guardarHist() {
@@ -339,7 +480,7 @@ function guardarHist() {
 $('bDeshacer').onclick = () => {
   if (!S.hist.length || S.ocupado) return;
   const h = S.hist.pop();
-  S.est = h.est; S.sel = h.sel; S.sucio = true;
+  S.est = h.est; S.sel = h.sel; S.seg = null; S.sucio = true;
   recalcular(); limitarScroll(); habilitar(); dibujar();
   setEstado('Deshecho.');
 };
@@ -347,19 +488,66 @@ $('bDeshacer').onclick = () => {
 // ---------- Estirar ----------
 $('bEstirar').onclick = () => {
   if (!S.est || S.ocupado) return;
-  if (!S.sel) { setEstado('Primero arrastrá sobre la onda para elegir el tramo.'); return; }
+  if (!S.sel) { setEstado('Primero arrastrá sobre la onda para elegir el tramo (herramienta Seleccionar).'); return; }
   const factor = parseFloat($('factor').value);
   if (!(factor > 0)) { setEstado('El factor no es válido.'); return; }
   const conservar = $('conservar').checked;
   const r = Editor.estirar(S.est, S.sel.a * 1000 / S.fp, S.sel.b * 1000 / S.fp, factor, conservar);
   if (!r) { setEstado('El tramo es demasiado corto.'); return; }
   guardarHist();
-  S.est = r.est;
+  S.est = r.est; S.seg = null;
   S.sel = { a: r.nuevoA * S.fp / 1000, b: r.nuevoB * S.fp / 1000 };
   if (!conservar) S.t0 = 0;
   S.sucio = true;
   recalcular(); limitarScroll(); dibujar();
   setEstado('Tramo estirado x' + factor + '. Apretá Reproducir para escucharlo (se sintetiza en ese momento).');
+};
+
+// ---------- Borrar ----------
+$('bBorrar').onclick = () => {
+  if (!S.est || S.ocupado) return;
+  let c0, c1, que;
+  if (S.herr === 'mover' && S.seg) { c0 = S.seg.c0; c1 = S.seg.c1; que = 'segmento'; }
+  else if (S.sel) { c0 = Math.round(S.sel.a * 1000 / S.fp); c1 = Math.round(S.sel.b * 1000 / S.fp); que = 'tramo'; }
+  else { setEstado('Elegí qué borrar: tocá un segmento con la herramienta Mover, o arrastrá un tramo con Seleccionar.'); return; }
+  const r = Editor.borrar(S.est, c0, c1, $('cerrar').checked);
+  if (!r) { setEstado('No se puede borrar eso (quedaría vacío).'); return; }
+  guardarHist();
+  S.est = r.est; S.seg = null; S.sel = null; S.sucio = true;
+  recalcular(); limitarScroll(); habilitar(); dibujar();
+  setEstado('Borrado el ' + que + ($('cerrar').checked ? ' y cerrado el hueco.' : ' (quedó en silencio).'));
+};
+
+// ---------- Afinar a la nota ----------
+function rangoCuadros() {
+  const n = S.est.mapa.length;
+  return S.sel ? [S.sel.a * 1000 / S.fp, S.sel.b * 1000 / S.fp] : [0, n - 1];
+}
+$('bAfinar').onclick = () => {
+  if (!S.est || S.ocupado) return;
+  const [a, b] = rangoCuadros();
+  const fuerza = parseFloat($('fuerza').value);
+  guardarHist();
+  const r = Editor.afinar(S.est, S.f0, a, b, {
+    retener: parseFloat($('modoAfinar').value),
+    fuerza: isNaN(fuerza) ? 1 : clamp(fuerza / 100, 0, 1),
+  });
+  if (!r.notas) {
+    S.hist.pop(); habilitar();
+    setEstado('No encontré voz para afinar en ' + (S.sel ? 'la selección.' : 'el audio.'));
+    return;
+  }
+  S.sucio = true; recalcular(); habilitar(); dibujar();
+  setEstado('Afinadas ' + r.notas + (r.notas === 1 ? ' nota' : ' notas') + (S.sel ? ' dentro de la selección' : ' en todo el audio') +
+            '. Escuchalo con Reproducir; la curva gris es el tono original.');
+};
+$('bTonoOrig').onclick = () => {
+  if (!S.est || S.ocupado) return;
+  const [a, b] = rangoCuadros();
+  guardarHist();
+  Editor.restablecerTono(S.est, a, b);
+  S.sucio = true; recalcular(); habilitar(); dibujar();
+  setEstado('Tono original restablecido' + (S.sel ? ' en la selección.' : ' en todo el audio.'));
 };
 
 // ---------- Sintesis, reproduccion, guardado ----------
@@ -391,8 +579,9 @@ async function reproducir() {
   const src = ctx.createBufferSource();
   src.buffer = buf; src.connect(ctx.destination);
   const dur = S.rendered.length / S.fs;
-  const ini = S.sel ? clamp(S.sel.a, 0, Math.max(0, dur - 0.05)) : 0;
-  const fin = S.sel ? clamp(S.sel.b, ini + 0.05, dur) : dur;
+  const rango = (S.herr === 'mover' && S.seg) ? { a: S.seg.c0 * S.fp / 1000, b: S.seg.c1 * S.fp / 1000 } : S.sel;
+  const ini = rango ? clamp(rango.a, 0, Math.max(0, dur - 0.05)) : 0;
+  const fin = rango ? clamp(rango.b, ini + 0.05, dur) : dur;
   src.start(0, ini, fin - ini);
   S.src = src; S.sonando = true; S.playIni = ini; S.tIni = ctx.currentTime;
   src.onended = () => { if (S.src === src) parar(); };
@@ -417,25 +606,30 @@ $('bPlay').onclick = reproducir;
 $('bGuardar').onclick = async () => {
   if (!S.est || S.ocupado) return;
   if (!(await asegurarRender())) return;
-  const w = Editor.aWav(S.rendered, S.fs);
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([w], { type: 'audio/wav' }));
-  a.download = 'estirado.wav';
-  document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  descargar(Editor.aWav(S.rendered, S.fs), 'estirado.wav', 'audio/wav');
   setEstado('Guardado como estirado.wav');
 };
 
 // ---------- Herramientas ----------
+const TEXTO_HERR = {
+  sel: 'Seleccionar: arrastrá para elegir un tramo; arrastrá los bordes naranjas para ajustarlo.',
+  tono: 'Tono: arrastrá sobre las notas para dibujar el tono (solo donde hay voz).',
+  cortar: 'Cortar: tocá donde quieras partir el audio (podés arrastrar para ajustar antes de soltar).',
+  mover: 'Mover: tocá un segmento para elegirlo y arrastralo a izquierda o derecha. Con Borrar lo sacás.',
+};
 function herramienta(h) {
   S.herr = h;
-  $('tSel').classList.toggle('on', h === 'sel');
-  $('tTono').classList.toggle('on', h === 'tono');
-  setEstado(h === 'sel' ? 'Seleccionar: arrastrá para elegir un tramo; arrastrá los bordes naranjas para ajustarlo.'
-                        : 'Tono: arrastrá sobre las notas para dibujar el tono (solo donde hay voz).');
+  if (h !== 'mover') S.seg = null;
+  [['sel', 'tSel'], ['tono', 'tTono'], ['cortar', 'tCortar'], ['mover', 'tMover']]
+    .forEach(([k, id]) => $(id).classList.toggle('on', h === k));
+  cv.style.cursor = h === 'mover' ? 'grab' : 'crosshair';
+  setEstado(TEXTO_HERR[h]);
+  dibujar();
 }
 $('tSel').onclick = () => herramienta('sel');
 $('tTono').onclick = () => herramienta('tono');
+$('tCortar').onclick = () => herramienta('cortar');
+$('tMover').onclick = () => herramienta('mover');
 
 function zoom(f) {
   const { W } = tam();
@@ -476,9 +670,15 @@ cv.addEventListener('pointerdown', (e) => {
     else if (S.sel && Math.abs(t - S.sel.b) < tol) S.ancla = S.sel.a;
     else { S.ancla = t; S.sel = { a: t, b: t }; }
     S.arr = 'sel';
-  } else {
+  } else if (S.herr === 'tono') {
     guardarHist(); S.arr = 'tono'; S.ultJ = null; S.ultM = null;
     ponerTono(p);
+  } else if (S.herr === 'cortar') {
+    S.arr = 'cortar'; S.cortePrev = frameDeX(p.x);
+  } else if (S.herr === 'mover') {
+    S.seg = Editor.segmentoEn(S.est, frameDeX(p.x));
+    S.arr = 'mover'; S.moverX0 = p.x; S.moverDelta = 0;
+    cv.style.cursor = 'grabbing';
   }
   dibujar();
 });
@@ -489,15 +689,48 @@ cv.addEventListener('pointermove', (e) => {
     const t = clamp(tDeX(p.x), 0, duracion());
     S.sel = { a: Math.min(S.ancla, t), b: Math.max(S.ancla, t) };
     dibujar();
-  } else {
+  } else if (S.arr === 'tono') {
     ponerTono(p);
+  } else if (S.arr === 'cortar') {
+    S.cortePrev = frameDeX(p.x);
+    dibujar();
+  } else if (S.arr === 'mover' && S.seg) {
+    S.moverDelta = Math.max(-S.seg.c0, Math.round((p.x - S.moverX0) / S.pps * 1000 / S.fp));
+    dibujar();
   }
 });
+
+function aplicarCorte() {
+  const j = S.cortePrev;
+  S.cortePrev = null;
+  const e = Editor.dividir(S.est, j);
+  if (!e) { setEstado('No se puede cortar ahí: está pegado al borde o a otro corte.'); return; }
+  guardarHist();
+  S.est = e;
+  setEstado('Corte agregado en ' + (j * S.fp / 1000).toFixed(2) + ' s. Con la herramienta Mover podés arrastrar cada segmento.');
+}
+function aplicarMover() {
+  const seg = S.seg, d = S.moverDelta;
+  S.moverDelta = 0;
+  cv.style.cursor = 'grab';
+  if (!seg) return;
+  if (!d) { setEstado('Segmento elegido (' + ((seg.c1 - seg.c0) * S.fp / 1000).toFixed(2) + ' s). Arrastralo para moverlo, o apretá Borrar.'); return; }
+  const r = Editor.mover(S.est, seg.c0, seg.c1, d);
+  if (!r) return;
+  guardarHist();
+  S.est = r.est; S.seg = { c0: r.c0, c1: r.c1 }; S.sucio = true;
+  recalcular(); limitarScroll();
+  setEstado('Segmento movido. Donde estaba quedó en silencio.');
+}
+
 function soltar() {
   if (!S.arr) return;
-  if (S.arr === 'sel' && S.sel && S.sel.b - S.sel.a < 0.02) S.sel = null;
-  if (S.arr === 'tono') S.sucio = true;
+  const modo = S.arr;
   S.arr = null;
+  if (modo === 'sel') { if (S.sel && S.sel.b - S.sel.a < 0.02) S.sel = null; }
+  else if (modo === 'tono') S.sucio = true;
+  else if (modo === 'cortar') aplicarCorte();
+  else if (modo === 'mover') aplicarMover();
   habilitar(); dibujar();
 }
 cv.addEventListener('pointerup', soltar);
@@ -516,9 +749,30 @@ cv.addEventListener('wheel', (e) => {
   limitarScroll(); dibujar();
 }, { passive: false });
 
+// ---------- Instalar como app (PWA) ----------
+let promptInstalar = null;
+window.addEventListener('beforeinstallprompt', (e) => {
+  e.preventDefault();
+  promptInstalar = e;
+  $('bInstalar').hidden = false;
+});
+$('bInstalar').onclick = async () => {
+  if (!promptInstalar) return;
+  promptInstalar.prompt();
+  try { await promptInstalar.userChoice; } catch (_) { /* cerrado */ }
+  promptInstalar = null;
+  $('bInstalar').hidden = true;
+};
+window.addEventListener('appinstalled', () => { $('bInstalar').hidden = true; });
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => { navigator.serviceWorker.register('sw.js').catch(() => { /* sin conexion offline */ }); });
+}
+
 window.addEventListener('resize', ajustar);
 ajustar();
 habilitar();
+herramienta('sel');
+setEstado('Abrí un audio para empezar.');
 })();
 </script>
 </body>

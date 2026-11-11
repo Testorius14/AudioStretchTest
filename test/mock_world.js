@@ -19,7 +19,8 @@ function createWorld() {
     f0 = new Float64Array(N);
     for (let i = 0; i < N; i++) {
       const t = i * fp / 1000;
-      f0[i] = (t > 1.4 && t < 1.6) ? 0 : 150 + 30 * Math.sin(2 * Math.PI * 0.7 * t);
+      // dos frases con un vibrato de +-3 Hz alrededor de 158 Hz (que esta ~27 cents sobre D#3)
+      f0[i] = (t > 1.4 && t < 1.6) ? 0 : 158 + 3 * Math.sin(2 * Math.PI * 5.5 * t);
     }
     brk = 8;  // el mock reinicia su "memoria" en cada analisis
     return N;
@@ -31,6 +32,7 @@ function createWorld() {
     let fase = 0;
     for (let i = 0; i < L; i++) {
       const j = Math.min(out - 1, Math.floor(i / (fs * fp / 1000)));
+      if (heap[pm / 8 + j] < 0) { heap[py / 8 + i] = 0; continue; }  // silencio
       const src = Math.min(N - 1, Math.max(0, Math.round(heap[pm / 8 + j])));
       const f = f0[src] * Math.pow(2, (ps ? heap[ps / 8 + j] : 0) / 12);
       fase += 2 * Math.PI * f / fs;

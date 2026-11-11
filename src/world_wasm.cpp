@@ -162,7 +162,8 @@ API int w_largo_salida(int out_cuadros) {
 }
 
 // Sintetiza siguiendo el mapa.
-//   mapa      : out_cuadros posiciones fraccionarias (en cuadros del original)
+//   mapa      : out_cuadros posiciones fraccionarias (en cuadros del original);
+//               un valor negativo = silencio en ese cuadro
 //   semitonos : null o out_cuadros valores (cambio de tono por cuadro)
 //   formante  : null o out_cuadros razones (1 = sin cambio, >1 = formantes mas agudos)
 //   y         : salida, y_length = w_largo_salida(out_cuadros)
@@ -179,6 +180,17 @@ API int w_render(const double* mapa, int out_cuadros, const double* semitonos,
   std::vector<double> tmp(bins);
 
   for (int j = 0; j < out_cuadros; ++j) {
+    // Un valor negativo en el mapa significa silencio (hueco dejado al mover o borrar).
+    if (mapa[j] < 0.0) {
+      f0[j] = 0.0;
+      double* sil_sp = &sp[(size_t)j * bins];
+      double* sil_ap = &ap[(size_t)j * bins];
+      for (int k = 0; k < bins; ++k) {
+        sil_sp[k] = 1e-16;
+        sil_ap[k] = 1.0 - 1e-12;
+      }
+      continue;
+    }
     double p = std::max(0.0, std::min((double)(N - 1), mapa[j]));
     int i0 = (int)std::floor(p);
     int i1 = std::min(i0 + 1, N - 1);

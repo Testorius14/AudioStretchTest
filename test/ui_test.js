@@ -7,7 +7,9 @@ const raiz = path.join(__dirname, '..');
 const sitio = '/tmp/ui_site';
 fs.rmSync(sitio, { recursive: true, force: true });
 fs.mkdirSync(sitio, { recursive: true });
-for (const f of ['index.html', 'editor.js', 'worker.js']) fs.copyFileSync(path.join(raiz, 'web', f), path.join(sitio, f));
+for (const f of fs.readdirSync(path.join(raiz, 'web'))) {
+  if (f !== 'world.js') fs.copyFileSync(path.join(raiz, 'web', f), path.join(sitio, f));  // world.js lo genera build.sh
+}
 fs.copyFileSync(path.join(__dirname, 'mock_world.js'), path.join(sitio, 'world.js'));
 
 // WAV de prueba: 3 s a 22050 Hz
@@ -18,7 +20,7 @@ fs.writeFileSync('/tmp/prueba.wav', Buffer.from(Editor.aWav(x, SR)));
 let fallos = 0;
 const check = (c, m) => { console.log((c ? '  OK    ' : '  FALLO ') + m); if (!c) fallos++; };
 
-const tipos = { '.html': 'text/html', '.js': 'text/javascript' };
+const tipos = { '.html': 'text/html', '.js': 'text/javascript', '.png': 'image/png', '.webmanifest': 'application/manifest+json' };
 const srv = http.createServer((req, res) => {
   const f = path.join(sitio, req.url === '/' ? 'index.html' : req.url.split('?')[0]);
   if (!fs.existsSync(f)) { res.writeHead(404); return res.end(); }

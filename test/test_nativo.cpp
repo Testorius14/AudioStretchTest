@@ -134,6 +134,37 @@ int main() {
   CHECK(N > 500, "cuadros = %d", N);
   CHECK(std::fabs(mediana_f0(0.2, 2.8) - 150) < 5, "F0 ~150 Hz (medido %.1f)", mediana_f0(0.2, 2.8));
 
+  printf("Silencio y saltos en el mapa (cortar, mover, borrar)\n");
+  w_analizar(x.data(), (int)x.size(), fs, 5.0, 71.0, 800.0, 0);
+  {
+    const int T = 600;  // 3 s
+    std::vector<double> ms(T);
+    for (int j = 0; j < T; ++j) ms[j] = (j >= 200 && j < 400) ? -1.0 : j;  // hueco de 1 a 2 s
+    int Ls = w_largo_salida(T);
+    std::vector<double> ys(Ls, 0.0);
+    int rs = w_render(ms.data(), T, nullptr, nullptr, ys.data(), Ls);
+    auto rms_en = [&](double d, double h) {
+      size_t i0 = (size_t)(d * fs), i1 = std::min((size_t)(h * fs), ys.size());
+      double s = 0;
+      for (size_t i = i0; i < i1; ++i) s += ys[i] * ys[i];
+      return std::sqrt(s / (i1 - i0));
+    };
+    double r_voz1 = rms_en(0.3, 0.9), r_hueco = rms_en(1.1, 1.9), r_voz2 = rms_en(2.1, 2.8);
+    CHECK(rs == 0 && finito(ys, &pico_y, &rms_y), "render con silencio ok");
+    CHECK(r_hueco < 1e-3, "el hueco queda en silencio (rms %.6f)", r_hueco);
+    CHECK(r_voz1 > 0.2 * rms_in && r_voz2 > 0.2 * rms_in, "la voz antes y despues se conserva (rms %.3f y %.3f)", r_voz1, r_voz2);
+
+    // salto: se saltea la parte de 1 a 2 s (borrar cerrando el hueco)
+    std::vector<double> mj(400);
+    for (int j = 0; j < 400; ++j) mj[j] = (j < 200) ? j : j + 200;
+    int Lj = w_largo_salida(400);
+    std::vector<double> yj(Lj, 0.0);
+    rs = w_render(mj.data(), 400, nullptr, nullptr, yj.data(), Lj);
+    CHECK(rs == 0 && finito(yj, &pico_y, &rms_y), "render con salto ok");
+    CHECK(std::fabs(Lj / (double)fs - 2.0) < 0.05, "duracion %.2f s (esperado ~2.0)", Lj / (double)fs);
+    CHECK(pico_y < 2.0 && rms_y > 0.3 * rms_in, "nivel razonable tras el salto (rms %.3f)", rms_y);
+  }
+
   printf(fallos ? "\n%d FALLOS\n" : "\nTodo bien\n", fallos);
   return fallos ? 1 : 0;
 }

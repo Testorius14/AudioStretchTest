@@ -1,0 +1,16 @@
+{
+  "name": "Estirador vocal",
+  "short_name": "Estirador",
+  "description": "Editor de voz con WORLD: estirar, cortar, mover y afinar notas.",
+  "lang": "es",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#2a2a2e",
+  "theme_color": "#2a2a2e",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
